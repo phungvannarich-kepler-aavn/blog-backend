@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Table
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from pydantic import BaseModel, EmailStr
@@ -28,6 +28,14 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
+# Association table for many-to-many relationship between posts and tags
+post_tags = Table(
+    'post_tags',
+    Base.metadata,
+    Column('post_id', Integer, ForeignKey('posts.id'), primary_key=True),
+    Column('tag_id', Integer, ForeignKey('tags.id'), primary_key=True)
+)
+
 # Database Models
 class User(Base):
     __tablename__ = "users"
@@ -42,6 +50,27 @@ class User(Base):
     posts = relationship("Post", back_populates="author")
     comments = relationship("Comment", back_populates="author")
 
+class Category(Base):
+    __tablename__ = "categories"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), unique=True, nullable=False)
+    description = Column(Text)
+    color = Column(String(7), default="#3B82F6")  # Hex color code
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    posts = relationship("Post", back_populates="category")
+
+class Tag(Base):
+    __tablename__ = "tags"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(50), unique=True, nullable=False)
+    color = Column(String(7), default="#6B7280")  # Hex color code
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    posts = relationship("Post", secondary=post_tags, back_populates="tags")
+
 class Post(Base):
     __tablename__ = "posts"
     
@@ -54,8 +83,11 @@ class Post(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     author_id = Column(Integer, ForeignKey("users.id"))
+    category_id = Column(Integer, ForeignKey("categories.id"))
     
     author = relationship("User", back_populates="posts")
+    category = relationship("Category", back_populates="posts")
+    tags = relationship("Tag", secondary=post_tags, back_populates="posts")
     comments = relationship("Comment", back_populates="post")
 
 class Comment(Base):
@@ -89,17 +121,49 @@ class UserResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class CategoryCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    color: Optional[str] = "#3B82F6"
+
+class CategoryResponse(BaseModel):
+    id: int
+    name: str
+    description: Optional[str]
+    color: str
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+class TagCreate(BaseModel):
+    name: str
+    color: Optional[str] = "#6B7280"
+
+class TagResponse(BaseModel):
+    id: int
+    name: str
+    color: str
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
 class PostCreate(BaseModel):
     title: str
     content: str
     summary: Optional[str] = None
     is_published: bool = False
+    category_id: Optional[int] = None
+    tag_ids: Optional[List[int]] = []
 
 class PostUpdate(BaseModel):
     title: Optional[str] = None
     content: Optional[str] = None
     summary: Optional[str] = None
     is_published: Optional[bool] = None
+    category_id: Optional[int] = None
+    tag_ids: Optional[List[int]] = None
 
 class PostResponse(BaseModel):
     id: int
@@ -111,6 +175,8 @@ class PostResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     author: UserResponse
+    category: Optional[CategoryResponse] = None
+    tags: List[TagResponse] = []
     
     class Config:
         from_attributes = True
@@ -138,8 +204,8 @@ class TokenData(BaseModel):
 # FastAPI app
 app = FastAPI(
     title="Blog API",
-    description="A modern blog backend API with authentication, posts, and comments",
-    version="1.0.0"
+    description="A modern blog backend API with authentication, posts, comments, categories, and tags",
+    version="1.1.0"
 )
 
 # CORS middleware
@@ -205,7 +271,7 @@ def generate_slug(title: str) -> str:
 # Routes
 @app.get("/")
 async def root():
-    return {"message": "Welcome to Blog API", "version": "1.0.0"}
+    return {"message": "Welcome to Blog API", "version": "1.1.0"}
 
 @app.post("/auth/register", response_model=UserResponse)
 async def register(user: UserCreate, db: Session = Depends(get_db)):
@@ -249,6 +315,55 @@ async def login(username: str, password: str, db: Session = Depends(get_db)):
 async def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
 
+# Category routes
+@app.post("/categories/", response_model=CategoryResponse)
+async def create_category(category: CategoryCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    db_category = Category(
+        name=category.name,
+        description=category.description,
+        color=category.color
+    )
+    db.add(db_category)
+    db.commit()
+    db.refresh(db_category)
+    return db_category
+
+@app.get("/categories/", response_model=List[CategoryResponse])
+async def read_categories(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    categories = db.query(Category).offset(skip).limit(limit).all()
+    return categories
+
+@app.get("/categories/{category_id}", response_model=CategoryResponse)
+async def read_category(category_id: int, db: Session = Depends(get_db)):
+    category = db.query(Category).filter(Category.id == category_id).first()
+    if category is None:
+        raise HTTPException(status_code=404, detail="Category not found")
+    return category
+
+# Tag routes
+@app.post("/tags/", response_model=TagResponse)
+async def create_tag(tag: TagCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    db_tag = Tag(
+        name=tag.name,
+        color=tag.color
+    )
+    db.add(db_tag)
+    db.commit()
+    db.refresh(db_tag)
+    return db_tag
+
+@app.get("/tags/", response_model=List[TagResponse])
+async def read_tags(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    tags = db.query(Tag).offset(skip).limit(limit).all()
+    return tags
+
+@app.get("/tags/{tag_id}", response_model=TagResponse)
+async def read_tag(tag_id: int, db: Session = Depends(get_db)):
+    tag = db.query(Tag).filter(Tag.id == tag_id).first()
+    if tag is None:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    return tag
+
 # Post routes
 @app.post("/posts/", response_model=PostResponse)
 async def create_post(post: PostCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -265,18 +380,35 @@ async def create_post(post: PostCreate, current_user: User = Depends(get_current
         summary=post.summary,
         slug=slug,
         is_published=post.is_published,
-        author_id=current_user.id
+        author_id=current_user.id,
+        category_id=post.category_id
     )
     db.add(db_post)
     db.commit()
     db.refresh(db_post)
+    
+    # Add tags if provided
+    if post.tag_ids:
+        for tag_id in post.tag_ids:
+            tag = db.query(Tag).filter(Tag.id == tag_id).first()
+            if tag:
+                db_post.tags.append(tag)
+        db.commit()
+        db.refresh(db_post)
+    
     return db_post
 
 @app.get("/posts/", response_model=List[PostResponse])
-async def read_posts(skip: int = 0, limit: int = 10, published_only: bool = True, db: Session = Depends(get_db)):
+async def read_posts(skip: int = 0, limit: int = 10, published_only: bool = True, category_id: Optional[int] = None, tag_id: Optional[int] = None, db: Session = Depends(get_db)):
     query = db.query(Post)
     if published_only:
         query = query.filter(Post.is_published == True)
+    
+    if category_id:
+        query = query.filter(Post.category_id == category_id)
+    
+    if tag_id:
+        query = query.join(Post.tags).filter(Tag.id == tag_id)
     
     posts = query.offset(skip).limit(limit).all()
     return posts
@@ -298,8 +430,20 @@ async def update_post(post_id: int, post: PostUpdate, current_user: User = Depen
         raise HTTPException(status_code=403, detail="Not enough permissions")
     
     update_data = post.dict(exclude_unset=True)
+    
+    # Handle tags separately
+    tag_ids = update_data.pop('tag_ids', None)
+    
     for field, value in update_data.items():
         setattr(db_post, field, value)
+    
+    # Update tags if provided
+    if tag_ids is not None:
+        db_post.tags.clear()
+        for tag_id in tag_ids:
+            tag = db.query(Tag).filter(Tag.id == tag_id).first()
+            if tag:
+                db_post.tags.append(tag)
     
     db_post.updated_at = datetime.utcnow()
     db.commit()
