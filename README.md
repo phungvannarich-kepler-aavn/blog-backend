@@ -65,6 +65,9 @@ Once the server is running, you can access:
 
 ## 🔗 API Endpoints
 
+### Health Check
+- `GET /health` - Health check endpoint for monitoring
+
 ### Authentication
 - `POST /auth/register` - Register a new user
 - `POST /auth/login` - Login user
