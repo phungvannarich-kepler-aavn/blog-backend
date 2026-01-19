@@ -5,7 +5,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, B
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from pydantic import BaseModel, EmailStr
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 import jwt
 import bcrypt
@@ -207,8 +207,35 @@ def generate_slug(title: str) -> str:
 async def root():
     return {"message": "Welcome to Blog API", "version": "1.0.0"}
 
+@app.get("/health")
+async def health_check():
+    """
+    Health check endpoint for monitoring and load balancers.
+    Returns the operational status of the API.
+    """
+    return {
+        "status": "healthy",
+        "service": "Blog API",
+        "version": "1.0.0",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
 @app.post("/auth/register", response_model=UserResponse)
 async def register(user: UserCreate, db: Session = Depends(get_db)):
+    # Validate username length and format
+    if len(user.username) < 3 or len(user.username) > 50:
+        raise HTTPException(
+            status_code=400, 
+            detail="Username must be between 3 and 50 characters"
+        )
+    
+    # Validate password strength
+    if len(user.password) < 8:
+        raise HTTPException(
+            status_code=400, 
+            detail="Password must be at least 8 characters long"
+        )
+    
     # Check if user already exists
     db_user = db.query(User).filter(User.username == user.username).first()
     if db_user:
@@ -232,6 +259,13 @@ async def register(user: UserCreate, db: Session = Depends(get_db)):
 
 @app.post("/auth/login", response_model=Token)
 async def login(username: str, password: str, db: Session = Depends(get_db)):
+    # Validate input parameters
+    if not username or not password or not username.strip() or not password.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username and password are required"
+        )
+    
     user = db.query(User).filter(User.username == username).first()
     if not user or not verify_password(password, user.hashed_password):
         raise HTTPException(
@@ -239,6 +273,14 @@ async def login(username: str, password: str, db: Session = Depends(get_db)):
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    
+    # Check if user account is active
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is inactive"
+        )
+    
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.username}, expires_delta=access_token_expires
