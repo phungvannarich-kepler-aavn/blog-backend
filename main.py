@@ -5,7 +5,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, B
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from pydantic import BaseModel, EmailStr
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 import jwt
 import bcrypt
@@ -217,7 +217,7 @@ async def health_check():
         "status": "healthy",
         "service": "Blog API",
         "version": "1.0.0",
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
 @app.post("/auth/register", response_model=UserResponse)
@@ -260,7 +260,7 @@ async def register(user: UserCreate, db: Session = Depends(get_db)):
 @app.post("/auth/login", response_model=Token)
 async def login(username: str, password: str, db: Session = Depends(get_db)):
     # Validate input parameters
-    if not username or not password:
+    if not username or not password or not username.strip() or not password.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Username and password are required"
